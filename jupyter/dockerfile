@@ -1,0 +1,37 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Installation des dépendances de base et Java 11
+RUN apt-get update && \
+    apt-get install -y openjdk-11-jdk wget curl python3 python3-pip && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Variables d'environnement
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+ENV SPARK_HOME=/opt/spark
+ENV PATH=$SPARK_HOME/bin:$JAVA_HOME/bin:$PATH
+
+# Installation de Spark
+ENV SPARK_VERSION=3.5.1
+RUN wget https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz -O /tmp/spark.tgz && \
+    tar -xzf /tmp/spark.tgz -C /opt && \
+    mv /opt/spark-${SPARK_VERSION}-bin-hadoop3 ${SPARK_HOME} && \
+    rm /tmp/spark.tgz
+
+# Téléchargement manuel des jars Kafka pour éviter le blocage au démarrage
+RUN wget https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.12/${SPARK_VERSION}/spark-sql-kafka-0-10_2.12-${SPARK_VERSION}.jar -P ${SPARK_HOME}/jars/ && \
+    wget https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/${SPARK_VERSION}/spark-token-provider-kafka-0-10_2.12-${SPARK_VERSION}.jar -P ${SPARK_HOME}/jars/ && \
+    wget https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.6.1/kafka-clients-3.6.1.jar -P ${SPARK_HOME}/jars/ && \
+    wget https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.12.0/commons-pool2-2.12.0.jar -P ${SPARK_HOME}/jars/
+
+# Installation des packages Python
+RUN pip3 install jupyterlab pyspark==${SPARK_VERSION} pandas pyarrow minio elasticsearch kafka-python --break-system-packages
+
+# Configuration utilisateur
+RUN useradd -m -s /bin/bash jupyter
+WORKDIR /home/jupyter
+RUN chown -R jupyter:jupyter /home/jupyter
+USER jupyter
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--allow-root", "--no-browser"]

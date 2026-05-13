@@ -1,0 +1,189 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: apache/kafka:3.7.0
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /tmp/kafka-log
+    depends_on:
+      - zookeeper
+
+  kafka-consumer:
+    image: apache/airflow:2.9.0
+    user: 0:0
+    volumes:
+      - ./scripts:/opt/scripts
+    command: >
+      bash -c "
+        pip install kafka-python==2.0.2 requests==2.31.0 &&
+        sleep 30 &&
+        python /opt/scripts/consume_traffic.py
+      "
+    depends_on:
+      - kafka
+      - elasticsearch
+    restart: always
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.4
+    ports:
+      - "9200:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: false
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+      xpack.security.http.ssl.enabled: false
+      xpack.security.transport.ssl.enabled: false
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.10.4
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  airflow-init:
+    image: apache/airflow:2.9.0
+    user: 0:0
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: 46BKJoQYlhXg2rPu5WKu95gHdopactgBM9p4HAGScGQ=
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+    command: >
+      bash -c "
+        pip install kafka-python==2.0.2 requests==2.31.0 &&
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@example.com
+          --password admin
+      "
+
+  airflow-webserver:
+    image: apache/airflow:2.9.0
+    user: 0:0
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: 46BKJoQYlhXg2rPu5WKu95gHdopactgBM9p4HAGScGQ=
+      AIRFLOW__WEBSERVER__SECRET_KEY: 949f6974e64906f0e7d581c853f68349479b1836a94f6974e64906f0
+      AIRFLOW__CORE__HOSTNAME_CALLABLE: socket:gethostname
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: 300
+      AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: 300
+      AIRFLOW__WEBSERVER__WORKERS: 2
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark-jobs:/opt/airflow/spark-jobs
+      - ./scripts:/opt/airflow/scripts
+      - ./jars:/opt/airflow/jars
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: webserver
+    depends_on:
+      - postgres
+      - airflow-init
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.0
+    user: 0:0
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: 46BKJoQYlhXg2rPu5WKu95gHdopactgBM9p4HAGScGQ=
+      AIRFLOW__WEBSERVER__SECRET_KEY: 949f6974e64906f0e7d581c853f68349479b1836a94f6974e64906f0
+      AIRFLOW__CORE__HOSTNAME_CALLABLE: socket:gethostname
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark-jobs:/opt/airflow/spark-jobs
+      - ./scripts:/opt/airflow/scripts
+      - ./jars:/opt/airflow/jars
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: scheduler
+    depends_on:
+      - postgres
+      - airflow-init
+
+  jupyter-pyspark:
+    image: jupyter/pyspark-notebook:python-3.11
+    user: root
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      GRANT_SUDO: "yes"
+      JUPYTER_ENABLE_LAB: "yes"
+      SPARK_SUBMIT_ARGS: >
+        --packages
+        org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,
+        org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,
+        org.apache.hadoop:hadoop-aws:3.3.4,
+        com.amazonaws:aws-java-sdk-bundle:1.12.262
+    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
+
+volumes:
+  minio_data:
+  es_data:
+  postgres_data:
