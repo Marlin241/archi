@@ -1,0 +1,11 @@
+.git
+.env
+__pycache__
+*.pyc
+.ipynb_checkpoints
+notebooks/
+jupyter/
+jars/
+spark-jobs/
+.venv/
+*.log

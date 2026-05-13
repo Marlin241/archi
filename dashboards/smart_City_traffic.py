@@ -22,10 +22,6 @@ def get_es_client():
         max_retries=5,
         verify_certs=False,
         ssl_show_warn=False,
-        headers={
-            "Accept": "application/vnd.elasticsearch+json; compatible-with=9",
-            "Content-Type": "application/vnd.elasticsearch+json; compatible-with=9",
-        },
     )
 
 
@@ -96,6 +92,9 @@ if not hits:
 
 df = pd.DataFrame([hit["_source"] for hit in hits])
 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+for col in ["latitude", "longitude", "speed"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
 st.write("Données brutes (premiers 10 événements)")
 st.dataframe(df.head(10))
@@ -103,11 +102,22 @@ st.dataframe(df.head(10))
 st.markdown("### Filtres")
 
 cities = sorted(df["city"].dropna().unique())
-sections = sorted(df["section_id"].dropna().unique())
 directions = sorted(df["direction"].dropna().unique())
 
+# Utilise section_name si disponible (nouveaux événements), sinon section_id
+has_section_name = "section_name" in df.columns and df["section_name"].notna().any()
+if has_section_name:
+    section_options = sorted(df[["section_id", "section_name"]].drop_duplicates()
+                             .apply(lambda r: r["section_name"], axis=1).dropna().unique())
+    section_id_by_name = (df[["section_id", "section_name"]].drop_duplicates()
+                          .set_index("section_name")["section_id"].to_dict())
+else:
+    section_options = sorted(df["section_id"].dropna().unique())
+    section_id_by_name = {s: s for s in section_options}
+
 selected_city = st.selectbox("Ville", ["Toutes"] + cities, index=0)
-selected_sections = st.multiselect("Section(s)", sections, default=sections)
+selected_section_labels = st.multiselect("Section(s)", section_options, default=section_options)
+selected_sections = [section_id_by_name[lbl] for lbl in selected_section_labels if lbl in section_id_by_name]
 selected_directions = st.multiselect("Direction(s)", directions, default=directions)
 
 df_filtered = df.copy()
@@ -126,51 +136,57 @@ st.dataframe(df_filtered.head(10))
 
 st.markdown("### Carte de Dakar — sections de trafic")
 
-fake_coords = {
-    "SEC-100": (14.7159, -17.4757),
-    "SEC-101": (14.7310, -17.4969),
-    "SEC-102": (14.6950, -17.4480),
-    "SEC-104": (14.7340, -17.4590),
-    "SEC-110": (14.7065, -17.4520),
-    "SEC-115": (14.7120, -17.4800),
-    "SEC-120": (14.6980, -17.4700),
-    "SEC-125": (14.7200, -17.4600),
-    "SEC-130": (14.6950, -17.4300),
-    "SEC-135": (14.7050, -17.4350),
-    "SEC-140": (14.7150, -17.4550),
-    "SEC-145": (14.7000, -17.4200),
-    "SEC-149": (14.6900, -17.4100),
-}
+has_coords = (
+    "latitude" in df_filtered.columns
+    and "longitude" in df_filtered.columns
+    and df_filtered["latitude"].notna().any()
+)
 
-sections_group = df_filtered.groupby("section_id").agg(
-    avg_speed=("speed", "mean"),
-    total_vehicles=("vehicle_count", "sum"),
-).reset_index()
-
-sections_group["latitude"] = sections_group["section_id"].map(lambda sec: fake_coords.get(sec, (0, 0))[0])
-sections_group["longitude"] = sections_group["section_id"].map(lambda sec: fake_coords.get(sec, (0, 0))[1])
-
-sections_map = sections_group[(sections_group["latitude"] != 0) & (sections_group["longitude"] != 0)].copy()
+if has_coords:
+    agg_dict = {
+        "speed": "mean",
+        "vehicle_count": "sum",
+        "latitude": "max",
+        "longitude": "max",
+    }
+    if has_section_name:
+        agg_dict["section_name"] = "first"
+    sections_group = df_filtered.groupby("section_id").agg(agg_dict).reset_index()
+    sections_group = sections_group.rename(columns={"speed": "avg_speed", "vehicle_count": "total_vehicles"})
+    if not has_section_name:
+        sections_group["section_name"] = sections_group["section_id"]
+    sections_map = sections_group.dropna(subset=["latitude", "longitude"]).copy()
+else:
+    sections_group = df_filtered.groupby("section_id").agg(
+        avg_speed=("speed", "mean"),
+        total_vehicles=("vehicle_count", "sum"),
+    ).reset_index()
+    sections_group["section_name"] = sections_group["section_id"]
+    sections_map = pd.DataFrame()
 
 if sections_map.empty:
-    st.warning("Aucune section trouvée avec coordonnées pour la carte.")
+    st.warning("Aucune section trouvée avec coordonnées GPS. Produisez de nouveaux événements pour afficher la carte.")
 else:
-    fig_map = px.scatter_map(
-        sections_map,
-        lat="latitude",
-        lon="longitude",
-        size="total_vehicles",
-        color="avg_speed",
-        hover_name="section_id",
-        hover_data=["avg_speed", "total_vehicles"],
-        color_continuous_scale="Portland",
-        size_max=30,
-        map_style="carto-darkmatter",
-        zoom=10,
-        title="Volume de trafic et vitesse moyenne par section (Dakar)",
-    )
-    fig_map.update_layout(margin={"r": 0, "t": 30, "l": 0, "b": 0})
-    st.plotly_chart(fig_map, use_container_width=True)
+    try:
+        fig_map = px.scatter_map(
+            sections_map,
+            lat="latitude",
+            lon="longitude",
+            size="total_vehicles",
+            color="avg_speed",
+            hover_name="section_name",
+            hover_data=["avg_speed", "total_vehicles", "section_id"],
+            color_continuous_scale="Portland",
+            size_max=30,
+            map_style="carto-darkmatter",
+            zoom=10,
+            title="Volume de trafic et vitesse moyenne par section (Dakar)",
+        )
+        fig_map.update_layout(margin={"r": 0, "t": 30, "l": 0, "b": 0})
+        st.plotly_chart(fig_map, use_container_width=True)
+    except Exception as e:
+        st.error(f"Erreur lors du rendu de la carte : {e}")
+        st.dataframe(sections_map[["section_name", "latitude", "longitude", "avg_speed", "total_vehicles"]])
 
 st.markdown("### Vitesse moyenne par ville")
 agg_city = df_filtered.groupby("city").agg(
@@ -223,11 +239,12 @@ if not sections_group.empty:
     top_10 = sections_group.nlargest(10, "total_vehicles")
     fig4 = px.bar(
         top_10,
-        x="section_id",
+        x="section_name",
         y="total_vehicles",
-        color="section_id",
+        color="section_name",
         title="Top 10 sections par volume de trafic",
     )
+    fig4.update_layout(xaxis_tickangle=-35, showlegend=False)
     st.plotly_chart(fig4, use_container_width=True)
 else:
     st.warning("Aucune section trouvée après filtrage.")

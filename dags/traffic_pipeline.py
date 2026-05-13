@@ -44,7 +44,7 @@ def run_consume():
 with DAG(
     'smart_city_final_v3',
     start_date=datetime(2026, 5, 11),
-    schedule_interval='@hourly',
+    schedule_interval='*/2 * * * *',
     catchup=False,
     tags=['smart-city']
 ) as dag:

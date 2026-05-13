@@ -1,4 +1,7 @@
 services:
+
+  # ─── Infrastructure ─────────────────────────────────────────────────────────
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.0
     ports:
@@ -25,27 +28,13 @@ services:
       KAFKA_LOG_DIRS: /tmp/kafka-log
     depends_on:
       - zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
     restart: unless-stopped
-
-  kafka-consumer:
-    image: apache/airflow:2.9.0
-    user: 0:0
-    volumes:
-      - ./scripts:/opt/scripts
-      - ./requirements.txt:/opt/requirements.txt
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
-      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
-    command: >
-      bash -c "
-        python -m pip install -r /opt/requirements.txt -q &&
-        sleep 30 &&
-        python /opt/scripts/consume_traffic.py
-      "
-    depends_on:
-      - kafka
-      - elasticsearch
-    restart: always
 
   minio:
     image: minio/minio:latest
@@ -58,7 +47,32 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     restart: unless-stopped
+
+  minio-init:
+    image: python:3.12-slim
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKETS: ${MINIO_BUCKETS}
+    volumes:
+      - ./scripts:/opt/scripts
+    command: >
+      bash -c "
+        pip install minio requests -q &&
+        python /opt/scripts/init_minio.py
+      "
+    restart: "no"
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.10.4
@@ -76,8 +90,8 @@ services:
       test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 15
+      start_period: 40s
     restart: unless-stopped
 
   kibana:
@@ -87,7 +101,8 @@ services:
     environment:
       ELASTICSEARCH_HOSTS: http://elasticsearch:9200
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -98,13 +113,23 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
+  # ─── Airflow ─────────────────────────────────────────────────────────────────
+
   airflow-init:
-    image: apache/airflow:2.9.0
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
     user: 0:0
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
@@ -118,11 +143,13 @@ services:
       bash -c "
         python -m pip install -r /opt/requirements.txt -q &&
         airflow db migrate &&
-        airflow users create --username ${AIRFLOW_ADMIN_USER} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL} --password ${AIRFLOW_ADMIN_PASSWORD}
+        airflow users create --username ${AIRFLOW_ADMIN_USER} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL} --password ${AIRFLOW_ADMIN_PASSWORD} || true
       "
 
   airflow-webserver:
-    image: apache/airflow:2.9.0
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
     user: 0:0
     ports:
       - "8080:8080"
@@ -138,6 +165,10 @@ services:
       AIRFLOW__WEBSERVER__WORKERS: 2
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ICEBERG_BUCKET: ${MINIO_ICEBERG_BUCKET}
+      JUPYTER_CONTAINER_NAME: ${JUPYTER_CONTAINER_NAME}
     volumes:
       - ./dags:/opt/airflow/dags
       - ./spark-jobs:/opt/airflow/spark-jobs
@@ -152,13 +183,15 @@ services:
       "
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
     restart: unless-stopped
 
   airflow-scheduler:
-    image: apache/airflow:2.9.0
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
     user: 0:0
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -169,6 +202,10 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ICEBERG_BUCKET: ${MINIO_ICEBERG_BUCKET}
+      JUPYTER_CONTAINER_NAME: ${JUPYTER_CONTAINER_NAME}
     volumes:
       - ./dags:/opt/airflow/dags
       - ./spark-jobs:/opt/airflow/spark-jobs
@@ -183,10 +220,50 @@ services:
       "
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
     restart: unless-stopped
+
+  # ─── Pipeline données ────────────────────────────────────────────────────────
+
+  kafka-consumer:
+    image: python:3.12-slim
+    volumes:
+      - ./scripts:/opt/scripts
+      - ./requirements.txt:/opt/requirements.txt
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
+      PYTHONUNBUFFERED: "1"
+    command: >
+      bash -c "
+        pip install -r /opt/requirements.txt -q &&
+        python /opt/scripts/consume_traffic.py
+      "
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: always
+
+  # ─── Dashboard ───────────────────────────────────────────────────────────────
+
+  streamlit-dashboard:
+    build:
+      context: .
+      dockerfile: dashboards/Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      ELASTICSEARCH_HOST: ${ELASTICSEARCH_URL}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Notebooks / Spark ───────────────────────────────────────────────────────
 
   jupyter-pyspark:
     image: jupyter/pyspark-notebook:python-3.11
@@ -195,9 +272,14 @@ services:
       - "8888:8888"
     volumes:
       - ./notebooks:/home/jovyan/work
+      - ./scripts:/home/jovyan/scripts
     environment:
       GRANT_SUDO: "yes"
       JUPYTER_ENABLE_LAB: "yes"
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ICEBERG_BUCKET: ${MINIO_ICEBERG_BUCKET}
       SPARK_SUBMIT_ARGS: >
         --packages
         org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,
