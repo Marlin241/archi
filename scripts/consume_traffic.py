@@ -1,18 +1,22 @@
 from kafka import KafkaConsumer
 import json
+import os
 import time
 import requests
 
-# CORRECTION : Utilise le port 9093 pour communiquer depuis Windows vers Docker
-bootstrap_servers = ['localhost:9093']
+# Depuis Windows : localhost:9093 / http://localhost:9200
+# Depuis Docker  : kafka:9092   / http://elasticsearch:9200
+bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9093').split(',')
+es_base = os.getenv('ELASTICSEARCH_URL', 'http://localhost:9200')
 topic = 'traffic_events'
-ES_URL = "http://localhost:9200/traffic_events/_doc"
+ES_URL = f"{es_base}/traffic_events/_doc"
+MAX_MESSAGES = int(os.getenv('MAX_MESSAGES', '0'))  # 0 = infini (mode standalone)
 
 # Attendre ES (démarre lentement)
 print("Attente Elasticsearch...")
 for i in range(60):  # 1 minute max
     try:
-        resp = requests.get("http://localhost:9200", timeout=5)
+        resp = requests.get(es_base, timeout=5)
         if resp.status_code == 200:
             print("ES prêt")
             break
@@ -30,7 +34,8 @@ try:
         value_deserializer=lambda m: json.loads(m.decode('utf-8')),
         auto_offset_reset='earliest',
         enable_auto_commit=True,
-        group_id='traffic_consumer_group'
+        group_id='traffic_consumer_group',
+        consumer_timeout_ms=30000,  # s'arrête après 30s sans message
     )
     print(f"Listening Kafka '{topic}'...")
 except Exception as e:
@@ -62,3 +67,9 @@ for msg in consumer:
     
     if total % 10 == 0:
         print(f"Total messages traités: {total}")
+
+    if MAX_MESSAGES > 0 and total >= MAX_MESSAGES:
+        print(f"Limite de {MAX_MESSAGES} messages atteinte. Arrêt.")
+        break
+
+print(f"Consumer terminé. Total: {total} messages.")

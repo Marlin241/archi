@@ -1,0 +1,19 @@
+# Messaging (kafka-python-ng = fork compatible Python 3.12+, même API)
+kafka-python-ng>=2.2.0
+
+# HTTP
+requests>=2.31.0
+
+# Storage objet
+minio>=7.2.0
+
+# Données
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Dashboard
+streamlit>=1.32.0
+plotly>=5.18.0
+elasticsearch>=8.10.0
+elastic-transport>=8.10.0
+pyiceberg>=0.6.0
