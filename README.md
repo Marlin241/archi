@@ -140,5 +140,4 @@ Le notebook `notebooks/spark_traffic_analysis.ipynb` illustre :
 ## Stockage MinIO
 
 - **Bucket** : `traffic-bucket`
-- **Chemin Iceberg** : `traffic-bucket/iceberg/`
-- **Chemin bronze** : `traffic-bucket/bronze/`
+- **Chemin Iceberg** : `traffic-bucket/iceberg/` (table `default.traffic_events`, partitionnée par ville)
